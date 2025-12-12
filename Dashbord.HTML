@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial Dashboard Pro (Hybrid)</title>
+    
+    <!-- 1. Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- 2. React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- 3. Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- 4. Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- 5. Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- 6. Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        window.firebaseModules = { 
+            initializeApp, getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, signOut,
+            getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy
+        };
+    </script>
+
+    <style>
+        body { background-color: #0f172a; color: #f1f5f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .glass-panel {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        .custom-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #0f172a; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
+        
+        .edit-input {
+            background: #0f172a;
+            border: 1px solid #475569;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            width: 100%;
+            transition: border-color 0.2s;
+        }
+        .edit-input:focus { outline: none; border-color: #3b82f6; }
+        
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fade-in { animation: fadeIn 0.5s ease-out forwards; }
+        .modal-backdrop { background-color: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect, useRef } = React;
+
+        // --- Firebase Initialization & Detection ---
+        const initFirebase = () => {
+            const modules = window.firebaseModules;
+            if (!modules) return null;
+            
+            // Check if config is injected (Cloud Mode) or missing (Local Mode)
+            const configStr = window.__firebase_config;
+            if (!configStr) return null; // Fallback to LocalStorage
+
+            try {
+                const firebaseConfig = JSON.parse(configStr);
+                const app = modules.initializeApp(firebaseConfig);
+                const auth = modules.getAuth(app);
+                const db = modules.getFirestore(app);
+                const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
+                return { auth, db, appId, modules, isCloud: true };
+            } catch (e) {
+                console.warn("Firebase config error, falling back to local:", e);
+                return null;
+            }
+        };
+
+        // --- Components ---
+        const Icon = ({ name, className = "", size = 20 }) => {
+            const ref = useRef(null);
+            useEffect(() => {
+                if (ref.current && window.lucide) {
+                    const i = document.createElement('i');
+                    i.setAttribute('data-lucide', name);
+                    if (className) i.className = className;
+                    ref.current.innerHTML = '';
+                    ref.current.appendChild(i);
+                    window.lucide.createIcons({ root: ref.current, nameAttr: 'data-lucide', attrs: { width: size, height: size } });
+                }
+            }, [name, className, size]);
+            return <span ref={ref} style={{ display: 'inline-flex', verticalAlign: 'middle' }}></span>;
+        };
+
+        const formatDate = (dateStr) => {
+            if (!dateStr) return '';
+            const date = new Date(dateStr);
+            return date.toLocaleDateString('th-TH', { year: '2-digit', month: 'short', day: 'numeric' });
+        };
+
+        // --- Helpers ---
+        const parseNumberSafe = (val) => {
+            if (!val) return 0;
+            if (typeof val === 'number') return val;
+            const cleanStr = val.toString().replace(/,/g, '').replace(/[^\d.-]/g, '');
+            const num = parseFloat(cleanStr);
+            return isNaN(num) ? 0 : num;
+        };
+
+        const parseCSV = (text) => {
+            const lines = text.split('\n').filter(line => line.trim() !== '');
+            if (lines.length < 2) return [];
+            const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, ''));
+            const getIndex = (keys) => headers.findIndex(h => keys.some(k => h.includes(k)));
+            const dateIdx = getIndex(['date', 'วันที่', 'time', 'วันที']);
+            const descIdx = getIndex(['description', 'รายการ', 'memo', 'detail']);
+            const catIdx = getIndex(['category', 'หมวด']);
+            const amountIdx = getIndex(['amount', 'จำนวน', 'ยอด', 'net']);
+            const typeIdx = getIndex(['type', 'ประเภท']);
+            const debitIdx = getIndex(['debit', 'ถอน', 'จ่าย']);
+            const creditIdx = getIndex(['credit', 'ฝาก', 'รับ']);
+
+            return lines.slice(1).map((line, index) => {
+                const cols = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || line.split(','); 
+                const cleanCols = cols.map(c => c ? c.trim().replace(/^"|"$/g, '') : '');
+                if (cleanCols.length < 2) return null;
+                let dateStr = dateIdx !== -1 ? cleanCols[dateIdx] : '';
+                let date = new Date().toISOString().split('T')[0];
+                let time = "00:00:00";
+                if (dateStr) {
+                    let normDate = dateStr.replace(/-/g, '/').trim();
+                    const dmyMatch = normDate.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?/);
+                    if (dmyMatch) {
+                        let d = parseInt(dmyMatch[1]), m = parseInt(dmyMatch[2]), y = parseInt(dmyMatch[3]), t = dmyMatch[4];
+                        if (y > 2400) y -= 543; if (y < 100) y += 2000;
+                        date = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                        if (t) { const tParts = t.split(':'); time = `${tParts[0].padStart(2,'0')}:${tParts[1].padStart(2,'0')}:${(tParts[2]||'00').padStart(2,'0')}`; }
+                    } else {
+                        const dObj = new Date(dateStr);
+                        if (!isNaN(dObj)) {
+                            date = dObj.toISOString().split('T')[0];
+                            const tMatch = dateStr.match(/(\d{1,2}:\d{2}(?::\d{2})?)/);
+                            if (tMatch) { const tParts = tMatch[1].split(':'); time = `${tParts[0].padStart(2,'0')}:${tParts[1].padStart(2,'0')}:${(tParts[2]||'00').padStart(2,'0')}`; }
+                        }
+                    }
+                }
+                let desc = descIdx !== -1 ? cleanCols[descIdx] : 'No Description';
+                let category = catIdx !== -1 ? cleanCols[catIdx] : 'Uncategorized';
+                let amount = 0;
+                let type = 'expense';
+                if (debitIdx !== -1 && creditIdx !== -1) {
+                    const debitVal = parseNumberSafe(cleanCols[debitIdx]);
+                    const creditVal = parseNumberSafe(cleanCols[creditIdx]);
+                    if (creditVal > 0) { amount = creditVal; type = 'income'; }
+                    else if (debitVal > 0) { amount = debitVal; type = 'expense'; }
+                } else if (amountIdx !== -1) {
+                    const rawAmount = parseNumberSafe(cleanCols[amountIdx]);
+                    amount = Math.abs(rawAmount);
+                    if (typeIdx !== -1) {
+                        const typeStr = cleanCols[typeIdx].toLowerCase();
+                        if (typeStr.match(/income|deposit|credit|รับ|ฝาก|\+/)) type = 'income'; else type = 'expense';
+                    } else { if (rawAmount > 0) type = 'income'; if (rawAmount < 0) type = 'expense'; }
+                }
+                if (amount === 0) return null;
+                return { 
+                    id: '_' + Math.random().toString(36).substr(2, 9),
+                    date, time, fullDateTime: new Date(`${date}T${time}`).toISOString(),
+                    description: desc, category, amount, type 
+                };
+            }).filter(Boolean);
+        };
+
+        const generateDemoData = () => {
+            const categories = ['อาหาร', 'เดินทาง', 'ช้อปปิ้ง', 'บ้าน', 'เงินเดือน', 'ลงทุน'];
+            const data = [];
+            const today = new Date();
+            for (let i = 0; i < 20; i++) {
+                const dateObj = new Date(today);
+                dateObj.setDate(dateObj.getDate() - (19 - i));
+                const date = dateObj.toISOString().split('T')[0];
+                const isIncome = Math.random() > 0.8;
+                const h = Math.floor(Math.random() * 24).toString().padStart(2,'0');
+                const m = Math.floor(Math.random() * 60).toString().padStart(2,'0');
+                const time = `${h}:${m}:00`;
+                data.push({
+                    id: '_' + Math.random().toString(36).substr(2, 9),
+                    date: date, time: time, fullDateTime: new Date(`${date}T${time}`).toISOString(),
+                    description: isIncome ? 'รายรับงานพิเศษ' : `ซื้อของทั่วไป`,
+                    category: isIncome ? 'เงินเดือน' : categories[Math.floor(Math.random() * 4)],
+                    amount: isIncome ? 5000 + Math.random() * 5000 : 100 + Math.random() * 1000,
+                    type: isIncome ? 'income' : 'expense'
+                });
+            }
+            return data;
+        };
+
+        // --- Add Modal ---
+        const AddTransactionModal = ({ isOpen, onClose, onSave }) => {
+            const [formData, setFormData] = useState({
+                date: new Date().toISOString().split('T')[0],
+                time: new Date().toTimeString().split(' ')[0].slice(0,5),
+                description: '',
+                category: 'อาหาร',
+                type: 'expense',
+                amount: ''
+            });
+            if (!isOpen) return null;
+            const handleChange = (e) => { const { name, value } = e.target; setFormData(prev => ({ ...prev, [name]: value })); };
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (!formData.description || !formData.amount) return alert('กรุณากรอกข้อมูลให้ครบถ้วน');
+                onSave({
+                    id: '_' + Math.random().toString(36).substr(2, 9),
+                    ...formData,
+                    amount: parseFloat(formData.amount),
+                    fullDateTime: new Date(`${formData.date}T${formData.time}`).toISOString()
+                });
+                setFormData(prev => ({ ...prev, description: '', amount: '' }));
+            };
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center modal-backdrop p-4 animate-fade-in">
+                    <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+                        <div className="flex justify-between items-center p-4 border-b border-slate-700 bg-slate-900">
+                            <h3 className="text-lg font-bold text-white flex items-center gap-2"><Icon name="plus-circle" className="text-green-400" /> เพิ่มรายการใหม่</h3>
+                            <button onClick={onClose} className="text-slate-400 hover:text-white transition"><Icon name="x" /></button>
+                        </div>
+                        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="block text-sm text-slate-400 mb-1">วันที่</label><input type="date" name="date" value={formData.date} onChange={handleChange} className="edit-input" required /></div>
+                                <div><label className="block text-sm text-slate-400 mb-1">เวลา</label><input type="time" name="time" value={formData.time} onChange={handleChange} className="edit-input" required /></div>
+                            </div>
+                            <div><label className="block text-sm text-slate-400 mb-1">รายการ</label><input type="text" name="description" value={formData.description} onChange={handleChange} placeholder="เช่น ค่าอาหาร" className="edit-input" required /></div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div><label className="block text-sm text-slate-400 mb-1">หมวดหมู่</label><select name="category" value={formData.category} onChange={handleChange} className="edit-input"><option value="อาหาร">อาหาร</option><option value="เดินทาง">เดินทาง</option><option value="ช้อปปิ้ง">ช้อปปิ้ง</option><option value="บ้าน/ที่พัก">บ้าน/ที่พัก</option><option value="บันเทิง">บันเทิง</option><option value="อื่นๆ">อื่นๆ</option></select></div>
+                                <div><label className="block text-sm text-slate-400 mb-1">ประเภท</label><select name="type" value={formData.type} onChange={handleChange} className="edit-input"><option value="expense">รายจ่าย (-)</option><option value="income">รายรับ (+)</option></select></div>
+                            </div>
+                            <div><label className="block text-sm text-slate-400 mb-1">จำนวนเงิน</label><input type="number" name="amount" value={formData.amount} onChange={handleChange} className="edit-input text-right font-bold text-green-400" required /></div>
+                            <div className="pt-4 flex gap-3"><button type="button" onClick={onClose} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-2 rounded-lg">ยกเลิก</button><button type="submit" className="flex-1 bg-green-600 hover:bg-green-500 text-white py-2 rounded-lg flex items-center justify-center gap-2"><Icon name="save" size={18} /> บันทึก</button></div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Charts ---
+        const ComboChart = ({ data, labels }) => {
+            const chartRef = useRef(null);
+            const chartInstance = useRef(null);
+            useEffect(() => {
+                if (chartInstance.current) chartInstance.current.destroy();
+                const ctx = chartRef.current.getContext('2d');
+                chartInstance.current = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            { type: 'line', label: 'รายรับ (เส้น)', data: data.income, borderColor: '#4ade80', borderWidth: 2, tension: 0.4, pointRadius: 2, order: 1 },
+                            { type: 'line', label: 'รายจ่าย (เส้น)', data: data.expense, borderColor: '#f87171', borderWidth: 2, tension: 0.4, pointRadius: 2, order: 2 },
+                            { type: 'bar', label: 'รายรับ (แท่ง)', data: data.income, backgroundColor: 'rgba(74, 222, 128, 0.2)', order: 3 },
+                            { type: 'bar', label: 'รายจ่าย (แท่ง)', data: data.expense, backgroundColor: 'rgba(248, 113, 113, 0.2)', order: 4 }
+                        ]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { labels: { color: '#cbd5e1' } } }, scales: { x: { ticks: { color: '#94a3b8' }, grid: { display: false } }, y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } } } }
+                });
+                return () => { if (chartInstance.current) chartInstance.current.destroy(); };
+            }, [data, labels]);
+            return <canvas ref={chartRef} />;
+        };
+
+        const DoughnutChart = ({ data }) => {
+            const chartRef = useRef(null);
+            const chartInstance = useRef(null);
+            useEffect(() => {
+                if (chartInstance.current) chartInstance.current.destroy();
+                const ctx = chartRef.current.getContext('2d');
+                chartInstance.current = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: { labels: data.map(d => d.name), datasets: [{ data: data.map(d => d.value), backgroundColor: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1'], borderWidth: 0 }] },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: '#cbd5e1' } } } }
+                });
+                return () => { if (chartInstance.current) chartInstance.current.destroy(); };
+            }, [data]);
+            return <canvas ref={chartRef} />;
+        };
+
+        // --- Auth Screen ---
+        const LoginScreen = ({ onLogin, loading, isCloudAvailable }) => {
+            const [localName, setLocalName] = useState('');
+            return (
+                <div className="flex flex-col items-center justify-center min-h-screen bg-slate-900 p-4">
+                    <div className="glass-panel p-8 rounded-2xl max-w-md w-full text-center animate-fade-in border border-blue-500/30">
+                        <div className="bg-blue-500/20 p-4 rounded-full w-20 h-20 mx-auto mb-6 flex items-center justify-center">
+                            <Icon name={isCloudAvailable ? "cloud" : "database"} className="text-blue-400 w-10 h-10" />
+                        </div>
+                        <h1 className="text-3xl font-bold mb-2 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">Financial {isCloudAvailable ? 'Cloud' : 'Local'}</h1>
+                        <p className="text-slate-400 mb-8">
+                            {isCloudAvailable 
+                                ? "ระบบจัดการบัญชีออนไลน์ (Cloud Sync)" 
+                                : "ระบบจัดการบัญชีออฟไลน์ (Local Mode)"}
+                        </p>
+                        
+                        {!isCloudAvailable && (
+                            <div className="mb-4 text-left">
+                                <label className="text-xs text-slate-400 ml-1">ชื่อผู้ใช้งาน (สำหรับแยกข้อมูลในเครื่อง)</label>
+                                <input type="text" value={localName} onChange={e => setLocalName(e.target.value)} placeholder="กรอกชื่อของคุณ" className="edit-input mt-1" />
+                            </div>
+                        )}
+
+                        <button onClick={() => onLogin(localName)} disabled={loading || (!isCloudAvailable && !localName)} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-xl transition flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20 disabled:opacity-50 disabled:cursor-not-allowed">
+                            {loading ? <><span className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></span> กำลังเข้าสู่ระบบ...</> : <><Icon name="log-in" className="w-5 h-5" /> เข้าใช้งาน</>}
+                        </button>
+                        
+                        <p className="mt-4 text-xs text-slate-500">
+                            {isCloudAvailable 
+                                ? "*ข้อมูลจะถูกเก็บปลอดภัยบน Cloud\nสามารถแชร์ลิงก์นี้ให้เพื่อนใช้ได้เลย" 
+                                : "*โหมดออฟไลน์: ข้อมูลจะถูกบันทึกในเครื่องนี้เท่านั้น\nหากต้องการใช้ Cloud กรุณาเปิดผ่านลิงก์ต้นฉบับ"}
+                        </p>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Main App ---
+        function App() {
+            const [user, setUser] = useState(null);
+            const [fbContext, setFbContext] = useState(null);
+            const [allTransactions, setAllTransactions] = useState([]);
+            const [loadingAuth, setLoadingAuth] = useState(true);
+            const [dateRange, setDateRange] = useState({ start: '', end: '' });
+            const [editingId, setEditingId] = useState(null);
+            const [editFormData, setEditFormData] = useState({});
+            const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+            const [isCloudMode, setIsCloudMode] = useState(false);
+
+            // 1. Initialize
+            useEffect(() => {
+                const init = async () => {
+                    // Try waiting a bit for firebase modules
+                    await new Promise(r => setTimeout(r, 500));
+                    
+                    const ctx = initFirebase();
+                    if (ctx && ctx.isCloud) {
+                        setFbContext(ctx);
+                        setIsCloudMode(true);
+                        ctx.modules.onAuthStateChanged(ctx.auth, (u) => {
+                            setUser(u);
+                            setLoadingAuth(false);
+                        });
+                        if (window.__initial_auth_token) await ctx.modules.signInWithCustomToken(ctx.auth, window.__initial_auth_token);
+                        else setLoadingAuth(false);
+                    } else {
+                        // Local Mode Initialization
+                        setIsCloudMode(false);
+                        const savedUser = sessionStorage.getItem('local_user');
+                        if (savedUser) {
+                            setUser(JSON.parse(savedUser));
+                        }
+                        setLoadingAuth(false);
+                    }
+                };
+                init();
+            }, []);
+
+            // 2. Auth Handlers
+            const handleLogin = async (localNameInput) => {
+                setLoadingAuth(true);
+                if (isCloudMode && fbContext) {
+                    try { await fbContext.modules.signInAnonymously(fbContext.auth); } 
+                    catch (err) { alert("เข้าสู่ระบบไม่สำเร็จ: " + err.message); setLoadingAuth(false); }
+                } else {
+                    // Local Login Mock
+                    const fakeUser = { uid: 'local_' + (localNameInput || 'user'), displayName: localNameInput };
+                    sessionStorage.setItem('local_user', JSON.stringify(fakeUser));
+                    setUser(fakeUser);
+                    setLoadingAuth(false);
+                }
+            };
+
+            const handleLogout = async () => {
+                if (isCloudMode && fbContext) {
+                    await fbContext.modules.signOut(fbContext.auth);
+                } else {
+                    sessionStorage.removeItem('local_user');
+                    setUser(null);
+                }
+                setAllTransactions([]);
+            };
+
+            // 3. Data Sync (Cloud vs Local)
+            useEffect(() => {
+                if (!user) return;
+
+                if (isCloudMode && fbContext) {
+                    // Cloud Sync
+                    const { db, appId, modules } = fbContext;
+                    const q = modules.query(
+                        modules.collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'),
+                        modules.orderBy('fullDateTime', 'asc')
+                    );
+                    const unsubscribe = modules.onSnapshot(q, (snapshot) => {
+                        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                        setAllTransactions(data);
+                    }, (error) => console.error("Sync error:", error));
+                    return () => unsubscribe();
+                } else {
+                    // Local Sync (Load once)
+                    const key = `financial_data_${user.uid}`;
+                    const saved = localStorage.getItem(key);
+                    if (saved) setAllTransactions(JSON.parse(saved));
+                }
+            }, [user, isCloudMode, fbContext]);
+
+            // Save Local Data when changed
+            useEffect(() => {
+                if (!isCloudMode && user) {
+                    localStorage.setItem(`financial_data_${user.uid}`, JSON.stringify(allTransactions));
+                }
+            }, [allTransactions, isCloudMode, user]);
+
+            // 4. CRUD Operations
+            const handleAddTransaction = async (newItem) => {
+                if (isCloudMode && fbContext) {
+                    const { db, appId, modules } = fbContext;
+                    await modules.addDoc(modules.collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), newItem);
+                } else {
+                    setAllTransactions(prev => [...prev, newItem]);
+                }
+                setIsAddModalOpen(false);
+            };
+
+            const addTransactionsBatch = async (items) => {
+                if (isCloudMode && fbContext) {
+                    const { db, appId, modules } = fbContext;
+                    const colRef = modules.collection(db, 'artifacts', appId, 'users', user.uid, 'transactions');
+                    for (const item of items) { await modules.addDoc(colRef, item); }
+                } else {
+                    setAllTransactions(prev => [...prev, ...items]);
+                }
+            };
+
+            const handleUpdate = async (id, newData) => {
+                if (isCloudMode && fbContext) {
+                    const { db, appId, modules } = fbContext;
+                    await modules.updateDoc(modules.doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', id), newData);
+                } else {
+                    setAllTransactions(prev => prev.map(t => t.id === id ? { ...t, ...newData } : t));
+                }
+            };
+
+            const handleDelete = async (id) => {
+                if (!confirm('ยืนยันการลบรายการนี้?')) return;
+                if (isCloudMode && fbContext) {
+                    const { db, appId, modules } = fbContext;
+                    await modules.deleteDoc(modules.doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', id));
+                } else {
+                    setAllTransactions(prev => prev.filter(t => t.id !== id));
+                }
+            };
+            
+            const handleClearAll = async () => {
+                if (!confirm('ต้องการลบข้อมูลทั้งหมดของคุณใช่หรือไม่? (กู้คืนไม่ได้)')) return;
+                if (isCloudMode && fbContext) {
+                    const { db, appId, modules } = fbContext;
+                    for (const t of allTransactions) {
+                        await modules.deleteDoc(modules.doc(db, 'artifacts', appId, 'users', user.uid, 'transactions', t.id));
+                    }
+                } else {
+                    setAllTransactions([]);
+                }
+            };
+
+            // --- Logic ---
+            const filteredTransactions = useMemo(() => {
+                let data = allTransactions;
+                if (dateRange.start || dateRange.end) {
+                    data = allTransactions.filter(t => {
+                        const tDate = new Date(t.date);
+                        const start = dateRange.start ? new Date(dateRange.start) : new Date('1900-01-01');
+                        const end = dateRange.end ? new Date(dateRange.end) : new Date('2100-12-31');
+                        end.setHours(23, 59, 59);
+                        return tDate >= start && tDate <= end;
+                    });
+                }
+                const sorted = [...data].sort((a, b) => new Date(a.fullDateTime) - new Date(b.fullDateTime));
+                let runningBalance = 0;
+                return sorted.map((item, idx) => {
+                    if (item.type === 'income') runningBalance += item.amount;
+                    else runningBalance -= item.amount;
+                    return { ...item, balance: runningBalance, sortedId: idx + 1 };
+                });
+            }, [allTransactions, dateRange]);
+
+            const stats = useMemo(() => {
+                const income = filteredTransactions.filter(t => t.type === 'income').reduce((sum, t) => sum + (t.amount || 0), 0);
+                const expense = filteredTransactions.filter(t => t.type === 'expense').reduce((sum, t) => sum + (t.amount || 0), 0);
+                return { income, expense, balance: income - expense, count: filteredTransactions.length };
+            }, [filteredTransactions]);
+
+            const chartData = useMemo(() => {
+                const trendMap = {}; const catMap = {};
+                filteredTransactions.forEach(t => {
+                    if (!trendMap[t.date]) trendMap[t.date] = { date: t.date, income: 0, expense: 0 };
+                    if (t.type === 'income') trendMap[t.date].income += t.amount;
+                    else { trendMap[t.date].expense += t.amount; catMap[t.category] = (catMap[t.category] || 0) + t.amount; }
+                });
+                const labels = Object.keys(trendMap).sort();
+                const incomeData = labels.map(d => trendMap[d].income);
+                const expenseData = labels.map(d => trendMap[d].expense);
+                const categoryData = Object.keys(catMap).map(k => ({ name: k, value: catMap[k] })).sort((a,b) => b.value - a.value);
+                return { labels, incomeData, expenseData, categoryData };
+            }, [filteredTransactions]);
+
+            const handleFileUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    try {
+                        const data = parseCSV(evt.target.result);
+                        if (data.length) addTransactionsBatch(data);
+                        else alert('ไม่พบข้อมูลในไฟล์');
+                    } catch (err) { alert('ไฟล์ไม่ถูกต้อง'); }
+                };
+                reader.readAsText(file);
+            };
+
+            const handleSaveEdit = (id) => {
+                const newData = {
+                    ...editFormData,
+                    amount: parseFloat(editFormData.amount),
+                    fullDateTime: new Date(`${editFormData.date}T${editFormData.time}`).toISOString()
+                };
+                handleUpdate(id, newData);
+                setEditingId(null);
+            };
+
+            const handleEditFormChange = (e) => {
+                const { name, value } = e.target;
+                setEditFormData({ ...editFormData, [name]: value });
+            };
+
+            if (!user) return <LoginScreen onLogin={handleLogin} loading={loadingAuth} isCloudAvailable={isCloudMode} />;
+
+            return (
+                <div className="max-w-7xl mx-auto p-4 md:p-8 animate-fade-in">
+                    <AddTransactionModal isOpen={isAddModalOpen} onClose={() => setIsAddModalOpen(false)} onSave={handleAddTransaction} />
+
+                    <header className="mb-8 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <div>
+                            <div className="flex items-center gap-2 mb-1">
+                                <span className={`${isCloudMode ? 'bg-green-500/20 text-green-400' : 'bg-orange-500/20 text-orange-400'} text-xs px-2 py-1 rounded-full flex items-center gap-1`}>
+                                    <span className={`w-2 h-2 ${isCloudMode ? 'bg-green-500' : 'bg-orange-500'} rounded-full animate-pulse`}></span> {isCloudMode ? 'Cloud Mode' : 'Local Mode'}
+                                </span>
+                                <span className="text-slate-500 text-xs">User: {user.displayName || user.uid.slice(0,5)}</span>
+                            </div>
+                            <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">Financial {isCloudMode ? 'Cloud' : 'Local'}</h1>
+                        </div>
+                        <div className="flex gap-2">
+                             <button onClick={handleLogout} className="text-slate-400 hover:text-white px-3 py-1 rounded border border-slate-600 hover:bg-slate-700 transition text-sm flex items-center gap-2">
+                                <Icon name="log-out" className="w-4 h-4" /> ออกจากระบบ
+                            </button>
+                             {allTransactions.length > 0 && (
+                                <button onClick={handleClearAll} className="text-red-400 hover:text-red-300 px-3 py-1 rounded border border-red-900/50 hover:bg-red-900/30 transition text-sm flex items-center gap-2">
+                                    <Icon name="trash-2" className="w-4 h-4" /> ล้างข้อมูล
+                                </button>
+                            )}
+                        </div>
+                    </header>
+
+                    {allTransactions.length === 0 ? (
+                        <div className="glass-panel p-10 rounded-xl border-dashed border-2 border-slate-600 text-center max-w-2xl mx-auto mt-20">
+                            <div className="mx-auto w-16 h-16 mb-4 flex items-center justify-center"><Icon name={isCloudMode ? "cloud-lightning" : "hard-drive"} className="text-blue-500" size={64} /></div>
+                            <h2 className="text-2xl font-semibold mb-2">ยินดีต้อนรับคุณ {user.displayName || 'ผู้ใช้งาน'}</h2>
+                            <p className="text-slate-400 mb-8">เริ่มบันทึกข้อมูลการเงินของคุณ ({isCloudMode ? 'ออนไลน์' : 'ออฟไลน์'})</p>
+                            <div className="flex gap-4 justify-center">
+                                <button onClick={() => setIsAddModalOpen(true)} className="bg-green-600 hover:bg-green-500 px-6 py-3 rounded-lg font-medium transition flex items-center gap-2 shadow-lg shadow-green-600/20 text-white"><Icon name="plus-circle" className="w-5 h-5" /> เพิ่มรายการแรก</button>
+                                <label className="cursor-pointer bg-slate-700 hover:bg-slate-600 px-6 py-3 rounded-lg font-medium transition flex items-center gap-2"><Icon name="upload" className="w-5 h-5" /> อัปโหลด CSV <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" /></label>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="animate-fade-in">
+                            <div className="glass-panel p-4 rounded-xl mb-6 flex flex-col md:flex-row gap-4 justify-between items-center">
+                                <div className="flex gap-2 overflow-x-auto w-full md:w-auto">
+                                    <button onClick={() => setDateRange({start:'',end:''})} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm">ทั้งหมด</button>
+                                </div>
+                                <div className="flex items-center gap-2 bg-slate-800 p-2 rounded-lg border border-slate-700">
+                                    <input type="date" value={dateRange.start} onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })} className="bg-slate-700 text-white px-3 py-1 rounded border border-slate-600 text-sm focus:outline-none" />
+                                    <span className="text-slate-400">-</span>
+                                    <input type="date" value={dateRange.end} onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })} className="bg-slate-700 text-white px-3 py-1 rounded border border-slate-600 text-sm focus:outline-none" />
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                                <div className="glass-panel p-5 rounded-xl border-l-4 border-green-500">
+                                    <p className="text-slate-400 text-xs uppercase font-bold mb-1">รายรับรวม</p>
+                                    <h3 className="text-2xl font-bold text-green-400">{stats.income.toLocaleString()} ฿</h3>
+                                </div>
+                                <div className="glass-panel p-5 rounded-xl border-l-4 border-red-500">
+                                    <p className="text-slate-400 text-xs uppercase font-bold mb-1">รายจ่ายรวม</p>
+                                    <h3 className="text-2xl font-bold text-red-400">{stats.expense.toLocaleString()} ฿</h3>
+                                </div>
+                                <div className="glass-panel p-5 rounded-xl border-l-4 border-blue-500">
+                                    <p className="text-slate-400 text-xs uppercase font-bold mb-1">คงเหลือสุทธิ</p>
+                                    <h3 className={`text-2xl font-bold ${stats.balance >= 0 ? 'text-blue-400' : 'text-orange-400'}`}>{stats.balance > 0 ? '+' : ''}{stats.balance.toLocaleString()} ฿</h3>
+                                </div>
+                                <div className="glass-panel p-5 rounded-xl border-l-4 border-purple-500">
+                                    <p className="text-slate-400 text-xs uppercase font-bold mb-1">จำนวนรายการ</p>
+                                    <h3 className="text-2xl font-bold text-white">{stats.count.toLocaleString()}</h3>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+                                <div className="lg:col-span-2 glass-panel p-6 rounded-xl h-80">
+                                    <ComboChart labels={chartData.labels} data={{ income: chartData.incomeData, expense: chartData.expenseData }} />
+                                </div>
+                                <div className="glass-panel p-6 rounded-xl h-80 relative">
+                                    {chartData.categoryData.length > 0 ? <DoughnutChart data={chartData.categoryData} /> : <div className="flex items-center justify-center h-full text-slate-500">No Data</div>}
+                                </div>
+                            </div>
+
+                            <div className="glass-panel rounded-xl overflow-hidden flex flex-col h-[600px] border border-slate-600 shadow-2xl">
+                                <div className="p-4 border-b border-slate-700 bg-slate-800/90 backdrop-blur flex justify-between items-center z-20">
+                                    <h3 className="font-semibold flex items-center gap-2 text-lg"><Icon name="list" className="w-5 h-5 text-blue-400" /> รายการเดินบัญชี</h3>
+                                    <div className="flex items-center gap-3">
+                                        <button onClick={() => setIsAddModalOpen(true)} className="bg-green-600 hover:bg-green-500 text-white px-3 py-1.5 rounded text-sm flex items-center gap-2 shadow-lg shadow-green-600/20">
+                                            <Icon name="plus" className="w-4 h-4" /> เพิ่มรายการ
+                                        </button>
+                                        <div className="text-xs text-slate-400 hidden md:block"><span className="bg-slate-900/50 px-3 py-1 rounded-full border border-slate-700">{dateRange.start ? `${formatDate(dateRange.start)} - ${dateRange.end || 'Now'}` : 'แสดงทั้งหมด'}</span></div>
+                                    </div>
+                                </div>
+                                <div className="overflow-auto flex-1 custom-scrollbar bg-slate-900/30">
+                                    <table className="w-full text-left text-sm text-slate-300">
+                                        <thead className="bg-slate-800 text-slate-400 text-xs uppercase tracking-wider sticky top-0 z-10 shadow-md">
+                                            <tr>
+                                                <th className="px-4 py-3 font-semibold w-12 text-center">#</th>
+                                                <th className="px-4 py-3 font-semibold w-28">วันที่</th>
+                                                <th className="px-4 py-3 font-semibold">รายการ</th>
+                                                <th className="px-4 py-3 font-semibold w-28">หมวดหมู่</th>
+                                                <th className="px-4 py-3 font-semibold w-24">ประเภท</th>
+                                                <th className="px-4 py-3 font-semibold text-right w-28">จำนวนเงิน</th>
+                                                <th className="px-4 py-3 font-semibold text-right w-28">คงเหลือ</th>
+                                                <th className="px-4 py-3 font-semibold text-center w-24">Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-700/50">
+                                            {[...filteredTransactions].reverse().map((t, i) => (
+                                                <tr key={t.id} className="hover:bg-slate-700/40 transition duration-150">
+                                                    {editingId === t.id ? (
+                                                        <>
+                                                            <td className="px-4 py-3 text-center">{t.sortedId}</td>
+                                                            <td className="px-4 py-3"><input type="date" name="date" value={editFormData.date} onChange={handleEditFormChange} className="edit-input mb-1" /><input type="time" name="time" value={editFormData.time} onChange={handleEditFormChange} className="edit-input" /></td>
+                                                            <td className="px-4 py-3"><input type="text" name="description" value={editFormData.description} onChange={handleEditFormChange} className="edit-input" /></td>
+                                                            <td className="px-4 py-3"><input type="text" name="category" value={editFormData.category} onChange={handleEditFormChange} className="edit-input" /></td>
+                                                            <td className="px-4 py-3"><select name="type" value={editFormData.type} onChange={handleEditFormChange} className="edit-input"><option value="income">รายรับ</option><option value="expense">รายจ่าย</option></select></td>
+                                                            <td className="px-4 py-3 text-right"><input type="number" name="amount" value={editFormData.amount} onChange={handleEditFormChange} className="edit-input text-right" /></td>
+                                                            <td className="px-4 py-3 text-right text-slate-500">-</td>
+                                                            <td className="px-4 py-3 text-center flex gap-1 justify-center">
+                                                                <button onClick={() => handleSaveEdit(t.id)} className="text-green-400 hover:text-green-300 p-1" title="บันทึกอัพเดท"><Icon name="save" size={18} /></button>
+                                                                <button onClick={() => { setEditingId(null); setEditFormData({}); }} className="text-red-400 hover:text-red-300 p-1"><Icon name="x" size={18} /></button>
+                                                            </td>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <td className="px-4 py-3 text-center text-slate-500 text-xs">{t.sortedId}</td>
+                                                            <td className="px-4 py-3 whitespace-nowrap font-mono text-slate-400">{formatDate(t.date)}<div className="text-xs text-slate-600">{t.time.slice(0,5)}</div></td>
+                                                            <td className="px-4 py-3 text-white font-medium">{t.description}</td>
+                                                            <td className="px-4 py-3"><span className="px-2 py-0.5 bg-slate-800 rounded border border-slate-700 text-xs">{t.category}</span></td>
+                                                            <td className="px-4 py-3 text-xs"><span className={`px-2 py-0.5 rounded ${t.type === 'income' ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'}`}>{t.type === 'income' ? 'รับ' : 'จ่าย'}</span></td>
+                                                            <td className="px-4 py-3 text-right font-mono">{t.type === 'income' ? <span className="text-green-400">+{t.amount.toLocaleString()}</span> : <span className="text-red-400">-{t.amount.toLocaleString()}</span>}</td>
+                                                            <td className="px-4 py-3 text-right font-mono font-bold text-blue-200 bg-slate-800/30">{t.balance.toLocaleString()}</td>
+                                                            <td className="px-4 py-3 text-center opacity-0 group-hover:opacity-100 transition-opacity flex gap-1 justify-center">
+                                                                <button onClick={() => { setEditingId(t.id); setEditFormData({...t}); }} className="text-blue-400 hover:text-blue-300 p-1" title="แก้ไข"><Icon name="pencil" size={16} /></button>
+                                                                <button onClick={() => handleDelete(t.id)} className="text-slate-500 hover:text-red-400 p-1"><Icon name="trash" size={16} /></button>
+                                                            </td>
+                                                        </>
+                                                    )}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
